@@ -1,4 +1,4 @@
-### 1.下载或clone到本地
+### 1.下载wireguard-install.sh或clone到本地
 
 ### 2.赋予执行权限
 ```
