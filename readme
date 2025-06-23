@@ -1,8 +1,9 @@
-1.下载或clone到本地
-2.赋予执行权限
-sudo chmod +x  wireguard-install.sh
+###1.下载或clone到本地
 
-3.运行脚本
-sudo ./wireguard-install.sh
+###2.赋予执行权限
+`sudo chmod +x  wireguard-install.sh`
 
-4.然后可以使用wireguard-ui-zh管理wireguard
+###3.运行脚本
+`sudo ./wireguard-install.sh`
+
+###4.然后可以使用[wireguard-ui-zh](https://github.com/o-i-i-o/wireguard-ui-zh)管理wireguard
