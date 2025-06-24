@@ -1,0 +1,386 @@
+#!/bin/bash
+
+# WireGuard安装配置脚本
+# 适用于常见Linux发行版
+# 需要root权限运行
+
+# 检查是否有root权限
+if [ "$(id -u)" -ne 0 ]; then
+    echo "请使用root权限运行此脚本" >&2
+    exit 1
+fi
+
+# 定义颜色输出
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+NC='\033[0m' # No Color
+
+echo -e "${GREEN}========== WireGuard 安装配置脚本 ==========${NC}"
+
+# 检测发行版
+echo -e "${YELLOW}[*] 检测操作系统发行版...${NC}"
+if [ -f /etc/os-release ]; then
+    . /etc/os-release
+    OS=$NAME
+    VER=$VERSION_ID
+else
+    OS=$(uname -s)
+    VER=$(uname -r)
+fi
+
+echo -e "${GREEN}[+] 检测到: ${OS} ${VER}${NC}"
+
+# 安装前准备
+echo -e "${YELLOW}[*] 准备系统环境...${NC}"
+case $OS in
+    "Ubuntu" | "Debian GNU/Linux")
+        apt update
+        apt install -y software-properties-common
+        add-apt-repository -y ppa:wireguard/wireguard
+        apt update
+        ;;
+    "CentOS Linux" | "Rocky Linux" | "AlmaLinux")
+        # 修复CentOS系列仓库问题
+        if ! rpm -q elrepo-release; then
+            yum install -y https://www.elrepo.org/elrepo-release-8.el8.elrepo.noarch.rpm
+            rpm --import https://www.elrepo.org/RPM-GPG-KEY-elrepo.org
+        fi
+        ;;
+    "Fedora Linux")
+        ;;
+    *)
+        echo -e "${YELLOW}[!] 不支持的发行版: ${OS}，尝试通用安装${NC}"
+        ;;
+esac
+
+# 安装WireGuard
+echo -e "${YELLOW}[*] 正在安装WireGuard...${NC}"
+case $OS in
+    "Ubuntu" | "Debian GNU/Linux")
+        apt install -y wireguard qrencode
+        ;;
+    "CentOS Linux" | "Rocky Linux" | "AlmaLinux")
+        yum install -y kmod-wireguard wireguard-tools qrencode
+        ;;
+    "Fedora Linux")
+        # 修复Fedora支持
+        dnf install -y kmod-wireguard wireguard-tools qrencode
+        ;;
+    *)
+        # 通用安装方法
+        if command -v apt-get &>/dev/null; then
+            apt install -y wireguard qrencode
+        elif command -v yum &>/dev/null; then
+            yum install -y wireguard-tools qrencode
+        elif command -v dnf &>/dev/null; then
+            dnf install -y wireguard-tools qrencode
+        else
+            echo -e "${RED}[!] 无法自动安装WireGuard，请手动安装${NC}"
+            exit 1
+        fi
+        ;;
+esac
+
+if [ $? -ne 0 ]; then
+    echo -e "${RED}[!] WireGuard安装失败${NC}"
+    exit 1
+fi
+
+echo -e "${GREEN}[+] WireGuard安装成功${NC}"
+
+# 配置网络转发
+echo -e "${YELLOW}[*] 配置网络转发...${NC}"
+echo "net.ipv4.ip_forward = 1" > /etc/sysctl.d/wg.conf
+echo "net.ipv6.conf.all.forwarding = 1" >> /etc/sysctl.d/wg.conf
+sysctl -p /etc/sysctl.d/wg.conf >/dev/null 2>&1
+
+if [ $? -ne 0 ]; then
+    echo -e "${YELLOW}[!] 网络转发配置警告（可能不影响使用）${NC}"
+else
+    echo -e "${GREEN}[+] 网络转发已启用${NC}"
+fi
+
+# 创建WireGuard配置
+echo -e "${YELLOW}[*] 创建WireGuard配置...${NC}"
+WG_DIR="/etc/wireguard"
+WG_CONFIG="${WG_DIR}/wg0.conf"
+mkdir -p $WG_DIR
+
+# 生成密钥
+echo -e "${YELLOW}[*] 生成WireGuard密钥...${NC}"
+umask 077
+PRIVATE_KEY=$(wg genkey)
+PUBLIC_KEY=$(echo "$PRIVATE_KEY" | wg pubkey)
+
+# 获取默认网络接口（改进方法）
+DEFAULT_IFACE=$(ip -4 route show default | awk '/default/ {print $5}' | head -n1)
+if [ -z "$DEFAULT_IFACE" ]; then
+    DEFAULT_IFACE=$(ip -4 route | awk '/^default/ {print $5; exit}')
+fi
+if [ -z "$DEFAULT_IFACE" ]; then
+    echo -e "${YELLOW}[!] 无法自动检测默认网络接口${NC}"
+    read -p "请输入默认网络接口名称: " DEFAULT_IFACE
+fi
+
+# 获取服务器公网IP
+echo -e "${YELLOW}[*] 获取服务器公网IP...${NC}"
+SERVER_PUBLIC_IP=$(curl -s -4 ifconfig.me)
+if [ -z "$SERVER_PUBLIC_IP" ]; then
+    echo -e "${YELLOW}[!] 无法获取公网IP，尝试备用方法${NC}"
+    SERVER_PUBLIC_IP=$(curl -s -4 icanhazip.com)
+fi
+if [ -z "$SERVER_PUBLIC_IP" ]; then
+    echo -e "${RED}[!] 无法获取公网IP，请手动输入${NC}"
+    read -p "请输入服务器公网IP: " SERVER_PUBLIC_IP
+fi
+
+# 配置端口
+echo -e "${YELLOW}[*] 配置WireGuard监听端口...${NC}"
+SERVER_PORT=51820
+read -p "请输入WireGuard监听端口 [默认: 51820]: " input_port
+if [ ! -z "$input_port" ]; then
+    SERVER_PORT=$input_port
+fi
+
+# 配置客户端信息
+echo -e "${YELLOW}[*] 配置客户端信息...${NC}"
+CLIENT_NAME="client"
+read -p "请输入客户端名称 [默认: client]: " input_client
+if [ ! -z "$input_client" ]; then
+    CLIENT_NAME=$input_client
+fi
+
+# 生成客户端密钥
+CLIENT_PRIVATE_KEY=$(wg genkey)
+CLIENT_PUBLIC_KEY=$(echo "$CLIENT_PRIVATE_KEY" | wg pubkey)
+# 随机生成客户端IP避免冲突
+CLIENT_IP="10.0.0.$((2 + RANDOM % 250))/32"
+
+# 创建服务器配置文件
+cat > $WG_CONFIG << EOF
+[Interface]
+Address = 10.0.0.1/24
+ListenPort = $SERVER_PORT
+PrivateKey = $PRIVATE_KEY
+PostUp = iptables -A FORWARD -i %i -j ACCEPT; iptables -t nat -A POSTROUTING -o $DEFAULT_IFACE -j MASQUERADE
+PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -t nat -D POSTROUTING -o $DEFAULT_IFACE -j MASQUERADE
+EOF
+
+# 添加IPv6支持（如果可用）
+if ip -6 route show default 2>/dev/null; then
+    DEFAULT_IFACE6=$(ip -6 route show default | awk '/default/ {print $5}' | head -n1)
+    if [ -n "$DEFAULT_IFACE6" ]; then
+        echo "PostUp = ip6tables -A FORWARD -i %i -j ACCEPT; ip6tables -t nat -A POSTROUTING -o $DEFAULT_IFACE6 -j MASQUERADE" >> $WG_CONFIG
+        echo "PostDown = ip6tables -D FORWARD -i %i -j ACCEPT; ip6tables -t nat -D POSTROUTING -o $DEFAULT_IFACE6 -j MASQUERADE" >> $WG_CONFIG
+    fi
+fi
+
+# 添加Peer配置
+cat >> $WG_CONFIG << EOF
+
+[Peer]
+PublicKey = $CLIENT_PUBLIC_KEY
+AllowedIPs = $CLIENT_IP
+EOF
+
+# 创建客户端配置文件
+CLIENT_CONFIG="${WG_DIR}/${CLIENT_NAME}.conf"
+
+# 使用系统DNS或备用DNS
+if [ -f /etc/resolv.conf ]; then
+    DNS_SERVERS=$(grep -E '^nameserver' /etc/resolv.conf | awk '{print $2}' | head -n 2 | tr '\n' ', ')
+    DNS_SERVERS=${DNS_SERVERS%, }
+fi
+[ -z "$DNS_SERVERS" ] && DNS_SERVERS="1.1.1.1, 1.0.0.1"
+
+cat > $CLIENT_CONFIG << EOF
+[Interface]
+PrivateKey = $CLIENT_PRIVATE_KEY
+Address = $CLIENT_IP
+DNS = $DNS_SERVERS
+
+[Peer]
+PublicKey = $PUBLIC_KEY
+Endpoint = $SERVER_PUBLIC_IP:$SERVER_PORT
+AllowedIPs = 0.0.0.0/0, ::/0
+PersistentKeepalive = 25
+EOF
+
+echo -e "${GREEN}[+] WireGuard配置完成${NC}"
+
+# 配置防火墙
+echo -e "${YELLOW}[*] 配置防火墙...${NC}"
+FIREWALL_CONFIGURED=false
+
+# 检查是否存在防火墙管理程序并优先使用
+if command -v ufw &>/dev/null && systemctl is-active --quiet ufw; then
+    echo -e "${YELLOW}[*] 发现ufw防火墙，使用ufw配置...${NC}"
+    ufw allow $SERVER_PORT/udp
+    ufw allow OpenSSH  # 确保SSH不被封锁
+    ufw reload
+    FIREWALL_CONFIGURED=true
+    echo -e "${GREEN}[+] ufw防火墙配置完成${NC}"
+elif command -v firewall-cmd &>/dev/null && systemctl is-active --quiet firewalld; then
+    echo -e "${YELLOW}[*] 发现firewalld，使用firewalld配置...${NC}"
+    firewall-cmd --permanent --add-port=$SERVER_PORT/udp
+    firewall-cmd --permanent --add-masquerade
+    firewall-cmd --reload
+    FIREWALL_CONFIGURED=true
+    echo -e "${GREEN}[+] firewalld配置完成${NC}"
+elif command -v nft &>/dev/null; then
+    echo -e "${YELLOW}[*] 发现nftables，使用nftables配置...${NC}"
+    # 检查是否有nftables规则文件
+    if [ -f /etc/nftables.conf ]; then
+        # 备份原文件
+        cp /etc/nftables.conf /etc/nftables.conf.bak
+        
+        # 添加WireGuard规则
+        if ! grep -q "udp dport $SERVER_PORT" /etc/nftables.conf; then
+            if grep -q "table inet filter" /etc/nftables.conf; then
+                # 如果已有filter表，添加到现有表中
+                sed -i "/table inet filter/a \ \tchain input {\n\t\ttype filter hook input priority 0;\n\t\tudp dport $SERVER_PORT accept\n\t}" /etc/nftables.conf
+            else
+                # 否则创建新表
+                cat >> /etc/nftables.conf << EOF
+
+table inet filter {
+    chain input {
+        type filter hook input priority 0;
+        udp dport $SERVER_PORT accept
+    }
+}
+EOF
+            fi
+        fi
+        
+        # 重新加载nftables
+        nft -f /etc/nftables.conf
+        FIREWALL_CONFIGURED=true
+        echo -e "${GREEN}[+] nftables配置完成${NC}"
+    else
+        echo -e "${YELLOW}[!] 未找到nftables配置文件，使用iptables配置...${NC}"
+    fi
+fi
+
+# 如果没有防火墙管理程序，使用iptables
+if [ "$FIREWALL_CONFIGURED" = false ]; then
+    echo -e "${YELLOW}[*] 使用iptables配置防火墙...${NC}"
+    if ! iptables -C INPUT -p udp --dport $SERVER_PORT -j ACCEPT 2>/dev/null; then
+        iptables -A INPUT -p udp --dport $SERVER_PORT -j ACCEPT
+    fi
+    
+    # 保存规则
+    if [ -x "$(command -v netfilter-persistent)" ]; then
+        netfilter-persistent save
+    elif [ -x "$(command -v iptables-save)" ]; then
+        mkdir -p /etc/iptables
+        iptables-save > /etc/iptables/rules.v4
+        ip6tables-save > /etc/iptables/rules.v6 2>/dev/null || true
+    else
+        echo -e "${YELLOW}[!] 无法自动保存iptables规则，请手动保存${NC}"
+    fi
+    
+    echo -e "${GREEN}[+] iptables配置完成${NC}"
+fi
+
+# SELinux支持
+if command -v semanage &>/dev/null; then
+    echo -e "${YELLOW}[*] 配置SELinux...${NC}"
+    if ! semanage port -l | grep -q "wireguard_port_t.*udp.*$SERVER_PORT"; then
+        semanage port -a -t wireguard_port_t -p udp $SERVER_PORT
+    fi
+    echo -e "${GREEN}[+] SELinux配置完成${NC}"
+fi
+
+# 启用并启动WireGuard服务
+echo -e "${YELLOW}[*] 启用并启动WireGuard服务...${NC}"
+systemctl enable --now wg-quick@wg0 2>/dev/null || systemctl enable wg-quick@wg0
+
+if ! systemctl is-active --quiet wg-quick@wg0; then
+    echo -e "${YELLOW}[!] 尝试手动启动WireGuard...${NC}"
+    wg-quick up wg0
+    
+    if [ $? -ne 0 ]; then
+        echo -e "${YELLOW}[*] 尝试加载内核模块...${NC}"
+        modprobe wireguard
+        wg-quick up wg0
+        
+        if [ $? -ne 0 ]; then
+            echo -e "${RED}[!] WireGuard服务启动失败，请检查配置${NC}"
+            echo -e "${YELLOW}[*] 您可以稍后手动运行: wg-quick up wg0${NC}"
+        fi
+    fi
+fi
+
+if systemctl is-active --quiet wg-quick@wg0 || wg show wg0 >/dev/null 2>&1; then
+    echo -e "${GREEN}[+] WireGuard服务已启动${NC}"
+else
+    echo -e "${YELLOW}[!] WireGuard未运行，但配置已完成${NC}"
+fi
+
+# 创建配置文件监控服务
+echo -e "${YELLOW}[*] 创建配置文件监控服务...${NC}"
+mkdir -p /etc/systemd/system
+
+# 创建wgui服务
+cat > /etc/systemd/system/wgui.service << EOF
+[Unit]
+Description=Restart WireGuard
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemctl restart wg-quick@wg0.service
+
+[Install]
+RequiredBy=wgui.path
+EOF
+
+# 创建wgui路径监控
+cat > /etc/systemd/system/wgui.path << EOF
+[Unit]
+Description=Watch /etc/wireguard/wg0.conf for changes
+
+[Path]
+PathModified=/etc/wireguard/wg0.conf
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# 启用并启动监控服务
+systemctl daemon-reload
+systemctl enable --now wgui.path
+
+if [ $? -eq 0 ]; then
+    echo -e "${GREEN}[+] 配置文件监控服务已启用${NC}"
+else
+    echo -e "${YELLOW}[!] 配置文件监控服务设置失败${NC}"
+fi
+
+# 显示配置信息
+echo -e "${GREEN}========== WireGuard配置信息 ==========${NC}"
+echo -e "${GREEN}[+] 服务器公钥:${NC} $PUBLIC_KEY"
+echo -e "${GREEN}[+] 服务器监听端口:${NC} $SERVER_PORT"
+echo -e "${GREEN}[+] 客户端配置文件:${NC} $CLIENT_CONFIG"
+echo -e "${GREEN}[+] 客户端IP地址:${NC} ${CLIENT_IP%%/*}"
+echo -e "${GREEN}[+] 客户端DNS:${NC} $DNS_SERVERS"
+echo -e "${GREEN}[+] QR码:${NC}"
+
+# 检查qrencode是否可用
+if command -v qrencode &>/dev/null; then
+    qrencode -t ansiutf8 < $CLIENT_CONFIG
+else
+    echo -e "${YELLOW}[!] 未找到qrencode，无法生成二维码${NC}"
+    echo -e "${YELLOW}[*] 请安装qrencode以生成二维码:"
+    echo -e "    Ubuntu/Debian: apt install qrencode"
+    echo -e "    CentOS/RHEL: yum install qrencode"
+    echo -e "    Fedora: dnf install qrencode${NC}"
+fi
+
+echo -e "${GREEN}========== 安装完成 ==========${NC}"
+echo -e "${GREEN}[+] WireGuard已成功安装并配置${NC}"
+echo -e "${GREEN}[+] 客户端配置文件位置: ${CLIENT_CONFIG}${NC}"
+echo -e "${GREEN}[+] 可以将此配置文件导入到WireGuard客户端应用中${NC}"
+echo -e "${YELLOW}[*] 注意: 如有防火墙问题，请确保端口 ${SERVER_PORT}/udp 已开放${NC}"
