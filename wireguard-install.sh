@@ -251,7 +251,6 @@ fi
 echo -e "${GREEN}[+] WireGuard服务已启动${NC}"
 
 #生成wgui监控服务
-
 cd /etc/systemd/system/
 cat << EOF > wgui.service
 [Unit]
