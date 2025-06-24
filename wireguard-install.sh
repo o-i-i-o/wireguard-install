@@ -250,6 +250,38 @@ fi
 
 echo -e "${GREEN}[+] WireGuard服务已启动${NC}"
 
+#生成wgui监控服务
+
+cd /etc/systemd/system/
+cat << EOF > wgui.service
+[Unit]
+Description=Restart WireGuard
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemctl restart wg-quick@wg0.service
+
+[Install]
+RequiredBy=wgui.path
+EOF
+
+cat << EOF > wgui.path
+[Unit]
+Description=Watch /etc/wireguard/wg0.conf for changes
+
+[Path]
+PathModified=/etc/wireguard/wg0.conf
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl enable wgui.{path,service}
+systemctl start wgui.{path,service}
+
+
+
 # 显示配置信息
 echo -e "${GREEN}========== WireGuard配置信息 ==========${NC}"
 echo -e "${GREEN}[+] 服务器公钥:${NC} $PUBLIC_KEY"
